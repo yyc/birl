@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+from copy import deepcopy
+
 import gridworld
 from gridworld import GridWorld
 from mdp import MDP
@@ -6,6 +8,7 @@ import numpy as np
 from birl import *
 from constants import *
 from prior import *
+
 
 
 def initialize_gridworld(width, height):
@@ -64,7 +67,7 @@ def get_trajectories(optimal_policy, mdp):
 
 if __name__ == '__main__':
     tp_weights, tp_beta = initialize_gridworld(5, 5)
-
+    np.random.seed(3425)
     #Load all the valid dataset
     demos = np.load("valid_trajectories.npy")
     demonstration_list = np.load("valid_demonstration_list.npy")
@@ -86,8 +89,8 @@ if __name__ == '__main__':
         mdps.append(deepcopy(temp_mdp))
 
     policy = birl(mdps, 0.02, 100, 1.0, demos[limits], demonstration_list[limits],demos[test_limits],demonstration_list[test_limits], 50, 5, d_states, 0.75, gt_reward_weight, PriorDistribution.UNIFORM)
-    print "Finished BIRL"
-    print "Agent Playing"
+    print("Finished BIRL")
+    print("Agent Playing")
     reward, playout = thing.play(policy)
-    print "Reward is " + str(reward)
-    print "Playout is " + str(playout)
+    print("Reward is " + str(reward))
+    print("Playout is " + str(playout))

@@ -324,7 +324,7 @@ class GridWorld:
             action_val = policy[state]
 
             demo.append((state, action_val))
-            print demo
+            print(demo)
 
             # --- Game logic should go here
             state = self.get_next_state(state, action_val)
