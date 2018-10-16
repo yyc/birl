@@ -16,7 +16,7 @@ class MDP:
         self.actions = range(np.shape(self.transitions)[1])
         self.max_value = max_value
         self.start = start
-        self.goal = goal
+        self.goal = (goal*torch.ones(1).long()).cuda()
         self.terminal = len(self.states) - 1
         self.check_valid_mdp()
         self.policy = None

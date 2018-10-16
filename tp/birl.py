@@ -162,8 +162,9 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
             posterior probability of original reward and policy
             '''
             post_new = compute_log_posterior(proposed_mdps, demos, demonstration_list, beta, prior, d_states, r_max, new_tp_weight, new_tp_beta)
-            fraction = np.exp(post_new - post_orig)
-            if (random.random() < min(1, fraction)):
+            fraction = torch.exp(post_new - post_orig)
+            a = torch.rand(1).double().cuda() < torch.min(torch.ones(1).double().cuda(), fraction)
+            if (torch.equal(a,torch.zeros(1).byte().cuda())):
                 for _,eind in demonstration_list:
                     mdps[eind].rewards = proposed_mdps[eind].rewards
                     mdps[eind].policy = proposed_mdps[eind].policy
@@ -177,8 +178,9 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
             posterior probability of original reward and original policy
             '''
             post_new = compute_log_posterior(proposed_mdps, demos, demonstration_list, beta, prior, d_states, r_max)
-            fraction = np.exp(post_new - post_orig)
-            if (random.random() < min(1, fraction)):
+            fraction = torch.exp(post_new - post_orig)
+            a = torch.rand(1).double().cuda() < torch.min(torch.ones(1).double().cuda(), fraction)
+            if (torch.equal(a,torch.zeros(1).byte().cuda())):
                 for _, eind in demonstration_list:
                     mdps[eind].rewards = proposed_mdps[eind].rewards
                 post_orig = post_new
@@ -201,34 +203,38 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
 
 # Demos comes in the form (actual reward, demo, confidence)
 def compute_log_prior_tpweights(tp_weight):
-    mu_tp_r = np.array([[0., 1., 0., 0., 0., 0., 0., 1., 0., -1., 0., 0., 0., 0., 0., 0.],
+    mu_tp_r = torch.Tensor([[0., 1., 0., 0., 0., 0., 0., 1., 0., -1., 0., 0., 0., 0., 0., 0.],
                      [0., 0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0.]])
-    mu_tp_r = mu_tp_r.flatten()
+    mu_tp_r = mu_tp_r.view(-1)
 
-    mu_tp_u = np.array([[0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0., 0.],
+    mu_tp_u = torch.Tensor([[0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0., 0.],
                      [0., 0., 1., 0., 0., 0., 0., 1., 0., 0., -1., 0., 0., 0., 0., 0.]])
-    mu_tp_u = mu_tp_u.flatten()
+    mu_tp_u = mu_tp_u.view(-1)
 
-    mu_tp_l = np.array([[0., 1., 0., 0., 0., 0., 0., -1., 0., -1., 0., 0., 0., 0., 0., 0.],
+    mu_tp_l = torch.Tensor([[0., 1., 0., 0., 0., 0., 0., -1., 0., -1., 0., 0., 0., 0., 0., 0.],
                      [0., 0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0.]])
-    mu_tp_l = mu_tp_l.flatten()
+    mu_tp_l = mu_tp_l.view(-1)
 
-    mu_tp_d = np.array([[0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0., 0.],
+    mu_tp_d = torch.Tensor([[0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0., 0.],
                      [0., 0., 1., 0., 0., 0., 0., -1., 0., 0., -1., 0., 0., 0., 0., 0.]])
-    mu_tp_d = mu_tp_d.flatten()
+    mu_tp_d = mu_tp_d.view(-1)
 
-    prob = 0.
+    prob = torch.zeros(1).cuda()
 
-    prob += mnorm.logpdf(tp_weight[0].flatten(), mean=mu_tp_r,cov=0.05*np.eye(len(mu_tp_r)))
-    prob += mnorm.logpdf(tp_weight[1].flatten(), mean=mu_tp_u, cov=0.05 * np.eye(len(mu_tp_u)))
-    prob += mnorm.logpdf(tp_weight[2].flatten(), mean=mu_tp_l, cov=0.05 * np.eye(len(mu_tp_l)))
-    prob += mnorm.logpdf(tp_weight[3].flatten(), mean=mu_tp_d, cov=0.05 * np.eye(len(mu_tp_d)))
-
-    return prob
+    prob += prob + torch.distributions.MultivariateNormal(mu_tp_r, 0.05 * torch.eye(len(mu_tp_r))).log_prob(
+        tp_weight[0].view(-1).cpu()).cuda()
+    prob += prob + torch.distributions.MultivariateNormal(mu_tp_u, 0.05 * torch.eye(len(mu_tp_u))).log_prob(
+        tp_weight[1].view(-1).cpu()).cuda()
+    prob += prob + torch.distributions.MultivariateNormal(mu_tp_l, 0.05 * torch.eye(len(mu_tp_l))).log_prob(
+        tp_weight[2].view(-1).cpu()).cuda()
+    prob += prob + torch.distributions.MultivariateNormal(mu_tp_d, 0.05 * torch.eye(len(mu_tp_d))).log_prob(
+        tp_weight[3].view(-1).cpu()).cuda()
+    return prob.double()
 
 
 def compute_log_prior_tpbeta(tp_beta):
-    return norm.logpdf(tp_beta,100.,1.)
+    return torch.distributions.Normal(100. * torch.ones(1).double(), 1. * torch.ones(1).double()).log_prob(
+        tp_beta.cpu()).cuda()
 
 
 def compute_log_posterior(mdps, demos, demonstration_list, beta, prior, d_states,r_max,tp_weight, tp_beta):
@@ -238,28 +244,32 @@ def compute_log_posterior(mdps, demos, demonstration_list, beta, prior, d_states
         mdp = mdps[demonstration_list[d,1]]
         # for each state action pair in the demo
         for sind,sa in enumerate(demo):
-            normalizer = []
+            n_actions = mdp.transitions.size()[1]
+            normalizer = torch.zeros(n_actions).cuda()
             # add to the list of normalization terms
-            for a in range(np.shape(mdp.transitions)[1]):
-                normalizer.append(beta * mdp.Q[sa[0], a])
+            for a in range(n_actions):
+                normalizer[a] = torch.mul(mdp.Q[sa[0], a],beta)
             '''
             We take the log of the normalizer, because we take exponent in the calling function,
             which gets rid of the log, and leaves the sum of the exponents. Also, we subtract by the log
             instead of dividing because subtracting logs can be rewritten as division
             '''
-            log_exp_val = log_exp_val + beta * mdp.Q[sa[0], sa[1]] - logsumexp(normalizer) #policy
+            log_exp_val = log_exp_val + torch.mul(mdp.Q[sa[0], sa[1]],beta) - torch.logsumexp(normalizer,dim=0).double() #policy
             if sind < len(demos)-1:
-                tpval = max(1e-16,mdp.transitions[sa[0],sa[1],demo[sind+1,0]])
-                log_exp_val = log_exp_val + np.log(tpval)
-            if sa[0] == mdp.goal:
+                tpval = torch.max(1e-16*torch.ones(1).cuda().double(),mdp.transitions[sa[0],sa[1],demo[sind+1,0]])
+                log_exp_val = log_exp_val + torch.log(tpval)
+            if torch.equal(sa[0],mdp.goal):
                 break
     # multiply by prior
-    return log_exp_val + compute_log_prior(prior, d_states, r_max) + compute_log_prior_tpweights(tp_weight) + compute_log_prior_tpbeta(tp_beta)
+    reward_prior = compute_log_prior(prior, d_states, r_max)
+    tpweights_prior = compute_log_prior_tpweights(tp_weight)
+    tpbeta_prior = compute_log_prior_tpbeta(tp_beta)
+    return log_exp_val + reward_prior  + tpweights_prior + tpbeta_prior
 
 
 def compute_log_prior(prior, d_states, r_max):
     if prior == PriorDistribution.UNIFORM:
-        return (- float(d_states)) * np.log(2 * r_max)
+        return torch.mul(torch.log(2. * r_max*torch.ones(1).cuda()),-1.*d_states).double()
 
 
 def mcmc_step(current_reward, current_tp_weights, current_tp_beta, mdps, valid_envs, step_size, r_max):
