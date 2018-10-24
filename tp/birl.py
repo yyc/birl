@@ -41,43 +41,24 @@ def get_expected_sor(samples, mdps, demonstration_list):
 
 
 def birl(mdps, step_size, iterations, r_max, demos, demonstration_list, test_demos, test_demonstration_list, burn_in, sample_freq, d_states, beta, gt_reward_weight,prior):
-    #if not isinstance(prior, PriorDistribution):
-    #    print("Invalid Prior")
-    #    raise ValueError
-    """
-    step_size = step_size
-    iterations =iterations
-    r_max = r_max
-    demos = demos
-    demonstration_list = torch.from_numpy(demonstration_list)
-    test_demos = torch.from_numpy(test_demos)
-    test_demonstration_list = torch.from_numpy(test_demonstration_list)
-    burn_in = burn_in*torch.ones(1)
-    sample_freq = sample_freq*torch.ones(1)
-    d_states = d_states*torch.ones(1)
-    beta= beta*torch.ones(1)
-    gt_reward_weight = torch.from_numpy(np.array(gt_reward_weight))
-    """
+    #Refer to the BIRL Paper by Deepak Ramachandran
+    #This code is different from paper in two aspects:
+    # 1) We deal with features for states instead of a table
+    # 2) We also treat transition probability as something to be learned through IRL
     samples, suboptimal_count = PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos,
                                            demonstration_list, d_states, beta, prior)
+
+    #Calculated expected sum of rewards using the current sampels and test datasets
     cum_exp_sor = get_expected_sor(samples, mdps, test_demonstration_list)
     cum_exp_sor = torch.from_numpy(np.array(cum_exp_sor))
+
+    #Get the moments for all the metrics (sum of reward, tp_weights, tp_beta)
     metric1 = torch.Tensor([torch.mean(cum_exp_sor),torch.std(cum_exp_sor)])
     metric2 = torch.cat((torch.mean(samples['tpflat'],dim=0),torch.mean(samples['tpflat'],dim=0)))
     metric3 = torch.Tensor([torch.mean(torch.Tensor(samples['tpbeta'])),torch.std(torch.Tensor(samples['tpbeta']))])
-    """
-    mean_val = np.mean(np.array(expected_sum_rewards), axis=0)
-    std_val = np.std(np.array(expected_sum_rewards),axis = 0)
-    print("Rewards are ")
-    print(mdp.rewards)
-    # Optimal deterministic policy
-    optimal_policy = mdp.policy_iteration()[0]
-    print("Computed Optimal BIRL policy")
-    return optimal_policy
-    """
-    return metric1,metric2,metric3,samples
-    #return None
 
+    return metric1,metric2,metric3,samples
+    
 
 # probability distribution P, mdp M, step size delta, and perhaps a previous policy
 # Returns : List of Sampled Rewards

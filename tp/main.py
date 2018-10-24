@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 from copy import deepcopy
-
 import gridworld
-from gridworld import GridWorld
 from mdp import MDP
 import numpy as np
 from birl import *
@@ -146,34 +144,44 @@ print "###########################################"
 if __name__ == '__main__':
     np.random.seed(3425)
 
+    #Get ground truth transition probability parameters and reward parameters used for generating trajectories
     tp_weights, tp_beta = initialize_gridworld(5, 5)
+    gt_reward_weight = [1, 0, 0, 0, 0, 0, 0, 0]
 
     #Load all the valid dataset
     demos = torch.from_numpy(np.load("valid_trajectories.npy")).cuda()
     demonstration_list = torch.from_numpy(np.load("valid_demonstration_list.npy")).cuda()
     env_features = torch.from_numpy(np.load("valid_environments.npy")).cuda()
     all_transitions = torch.from_numpy(np.load("valid_transitions.npy")).cuda()
-    all_starting_pos = demonstration_list[:,0]
+    all_starting_pos = demonstration_list[:,0] #Start position for each trajectory. State features and environment policies are not affected by this
     _,_,d_states = env_features.size()
+    #Use the last environment for test.
+    #For all the trajectories in this environment, goal position is fixed. Start position moves around the grid
     test_env = 24
     test_env_start = 576
 
+    #Populate the training dataset with a random trajectory.
+    #This stores the indices of the trajectory
+    #Need to be removed in the future since we want all trajectories including the first one to be selected by the algorithm
     limits = np.random.randint(0,test_env_start,1)
-    test_limits = np.arange(test_env_start,len(demos))
-    gt_reward_weight = [1,0,0,0,0,0,0,0]
 
+    #Define all the MDPs used by the trajectories
     mdps = []
-    #for _,eind in demonstration_list[limits]:
     for eind,_ in enumerate(env_features):
         goal = np.where(env_features[eind,:,0]==1)[0][0]
-        temp_mdp = MDP(tp_weights,tp_beta, env_features[eind],gt_reward_weight,0.99,start=all_starting_pos[eind],goal=goal)
+        temp_mdp = MDP(tp_weights,tp_beta, env_features[eind],gt_reward_weight,0.99,start=all_starting_pos[eind],goal=goal) #start can be anything since it is updated later
         mdps.append(deepcopy(temp_mdp))
 
+
+    #Get the indices and demonstrations for test set
+    test_limits = np.arange(test_env_start,len(demos))
     test_demos = demos[test_env_start:]
+    #Calculated the ground truth expected sum of reward for test set
     test_exp_sor = 0.
     for td in test_demos:
         test_exp_sor += mdps[test_env].get_reward_of_trajectory(td)
     test_sor = torch.Tensor([test_exp_sor/len(test_demos),torch.zeros(1)])
+    #Get ground truth tp_mean and variance. Since it is a single vector, the variance is zero
     test_tpw = torch.cat((tp_weights.view(-1),torch.zeros(len(tp_weights.view(-1))).cuda()))
     test_tpb = torch.Tensor([tp_beta,0.])
 
@@ -213,10 +221,7 @@ if __name__ == '__main__':
     np.save("lweights.npy", learned_weights)
 
     """
-    #D = demos[limits]
-    #Dind = limits
-    #eall = []
-
+    """
     D = demos
     Dind = np.arange(len(demos))
     eall = []
@@ -241,27 +246,43 @@ if __name__ == '__main__':
     np.save("lreward.npy", learned_reward)
     np.save("lbeta.npy", learned_beta)
     np.save("lweights.npy", learned_weights)
+    """
 
+    #Start the training
+    D = demos[limits]
+    Dind = limits
+    eall = []
     add_more = True
     while (add_more):
         print ("Size of dataset: %d" %(len(Dind)))
+        #To store the best metric and samples
         best_metric = None
         best_d = None
-        first_time = True
-        set_start_time = timeit.default_timer()
         best_samples = None
         best_r_samples = None
         best_tw_samples = None
         best_tb_samples = None
+        first_time = True
+
+        #Temporary time measurements
+        set_start_time = timeit.default_timer()
+
+        #Enumerate through all trajectories in the training set
         for current_d in range(0,test_env_start):
             start_time = timeit.default_timer()
-            if not current_d in Dind:
+            if not current_d in Dind: #Only consider trajectories that are not already selected
+                #Current training set combines previous selected trajectories + trajectory under investigation
                 tempDind = deepcopy(Dind)
                 tempDind = np.append(tempDind,current_d)
+
+                #BIRL CODE
                 metric_sor, metric_tpw, metric_tpb,samples = birl(mdps, 0.02, 110, 1.0, demos[tempDind], demonstration_list[tempDind], demos[test_limits],
                          demonstration_list[test_limits], 10, 1, d_states, 0.75, gt_reward_weight,
                          PriorDistribution.UNIFORM)
+                #Comapre the moments of expected sum of reward
                 metric_compare = torch.norm(metric_sor.cuda() - test_sor.cuda()) + torch.norm(metric_tpw-test_tpw) + torch.norm(metric_tpb.cuda() - test_tpb.cuda())
+
+                #Compare and store the best metrics
                 if first_time:
                     best_metric = metric_compare
                     best_d = current_d
@@ -274,6 +295,7 @@ if __name__ == '__main__':
                         best_samples = samples
             print "Time for iteration: " + str(timeit.default_timer()-start_time)
 
+        #Store the best sample for this iteration
         best_r_samples = torch.unsqueeze(samples['reward'][0],dim = 0)
         best_tb_samples = torch.unsqueeze(samples['tpbeta'][0],dim = 0)
         best_tw_samples = torch.unsqueeze(samples['tpweights'][0],dim = 0)
@@ -282,8 +304,6 @@ if __name__ == '__main__':
             best_r_samples = torch.cat((best_r_samples, torch.unsqueeze(samples['reward'][i], dim=0)))
             best_tb_samples = torch.cat((best_tb_samples, torch.unsqueeze(samples['tpbeta'][0], dim=0)))
             best_tw_samples = torch.cat((best_tw_samples, torch.unsqueeze(samples['tpweights'][0], dim=0)))
-
-
 
         best_r_samples_np = best_r_samples.cpu().numpy()
         best_tb_samples_np = best_tb_samples.cpu().numpy()
@@ -299,6 +319,7 @@ if __name__ == '__main__':
         np.save("SampleTPWeight"+str(len(Dind))+".npy",best_tw_samples_np)
         np.save("SampleTPBeta"+str(len(Dind))+".npy",best_tb_samples_np)
 
+        #Stopping condition
         if len(D) > 100:
             add_more = False
         print ("Time taken for Full set is %f" % ((timeit.default_timer() - set_start_time)))
