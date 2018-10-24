@@ -3,12 +3,17 @@ import numpy as np
 from pdb import set_trace
 import torch
 import torch.nn.functional as F
+import timeit
+from copy import deepcopy
 
 
 class MDP:
-    def __init__(self, transition_weights, transition_beta, env_features, reward_weights, gamma, start=None, goal = None, terminal=None, max_value=1000):
-        self.env_features = torch.from_numpy(env_features).cuda()
-        self.transitions = self.calculate_tp(torch.from_numpy(transition_weights).cuda(),transition_beta)
+    def __init__(self, transition_weights, transition_beta, env_features, reward_weights, gamma, start=None, goal = None, terminal=None, max_value=1000000):
+        self.n_states,self.d_states = env_features.size()
+        self.n_action,_,_ = transition_weights.size()
+        self.env_features = env_features
+        self.transitions = self.calculate_tp(transition_weights.cuda(),transition_beta)
+        self.n_states,self.n_action,_ = self.transitions.size()
         num_actions = self.transitions.size()[1]
         self.rewards = self.calculate_rewards(torch.Tensor(reward_weights).cuda())
         self.gamma = gamma
@@ -18,31 +23,38 @@ class MDP:
         self.start = start
         self.goal = (goal*torch.ones(1).long()).cuda()
         self.terminal = len(self.states) - 1
-        self.check_valid_mdp()
+        assert(self.check_valid_mdp())
         self.policy = None
         self.Q = None
+        self.changed = False
+        self.gt_reward = torch.Tensor(reward_weights).cuda()
+        self.gt_tpweights = transition_weights
+        self.gt_tpbeta = transition_beta
+        self.init_zero = torch.zeros(len(self.states)).cuda()
 
     def check_valid_mdp(self):
-        is_valid = True
         # Need to be of the form S,A,T(S,A)
-        if not (len(np.shape(self.transitions)) == 3):
-            is_valid = False
+        if not ((self.transitions.size()).__len__() == 3):
+            return False
         # check that state space size is same in both dims
-        if not (np.shape(self.transitions)[0] == np.shape(self.transitions)[2]):
-            is_valid = False
+        if not self.transitions.size()[0] == self.transitions.size()[2]:
+            return False
         # check that probabilities are valid
-        for s in range(np.shape(self.transitions)[0]):
-            for a in range(np.shape(self.transitions)[1]):
-                prob_sum = 0
-                for sprime in range(np.shape(self.transitions)[2]):
-                    prob = self.transitions[s][a][sprime]
-                    if prob < 0 or prob > 1:
-                        is_valid = False
-                    prob_sum += prob
-                np.testing.assert_almost_equal(1.0, prob_sum)
+
+        if torch.equal(torch.gt(torch.max(self.transitions),1.),torch.ones(1).byte().cuda()):
+            return False
+
+        if torch.equal(torch.lt(torch.min(self.transitions),0.),torch.ones(1).byte().cuda()):
+            return False
+
+        if not torch.equal(torch.sum(self.transitions, dim=2),
+                           torch.ones(self.transitions.size()[0], self.transitions.size()[1]).double().cuda()):
+            return False
+
         if self.gamma < 0 or self.gamma > 1:
-            is_valid = False
-        assert (is_valid)
+            return False
+
+        return True
 
     '''
     Policy Iteration from Sutton and Barto
@@ -74,7 +86,7 @@ class MDP:
         return (policy, V)
 
     def get_random_policy(self):
-        policy = torch.zeros(len(self.states)).cuda().int()
+        policy = self.init_zero.int()
         for state in self.states:
             policy[state] =torch.randint(0, len(self.actions),(1,)).cuda()
         return policy
@@ -84,31 +96,24 @@ class MDP:
     -Deterministic policy evaluation
     '''
 
-    def policy_evaluation(self, policy, theta=0.0001):
-        V = torch.zeros(len(self.states)).cuda().double()
-        count = 0
-        while True:
-            delta = torch.zeros(1).cuda().double()
-            for state in self.states:
-                value = V[state]
-                V[state] = torch.dot(self.transitions[state, policy[state], :], self.rewards + self.gamma * V)
-                delta = torch.max(delta, torch.abs(value - V[state]))
-                # If divergence and policy has value -inf, return value function early
-                if V[state] > self.max_value:
-                    return V
-                if V[state] < -self.max_value:
-                    return V
-            if delta < theta:
-                break
+    def policy_evaluation(self, policy, theta=1e-8):
+        policy = policy.unsqueeze(dim=1)
+        policy = policy.unsqueeze(dim=2)
+        policy = policy.expand(-1, self.n_action, self.n_states).long()
+        T1 = torch.gather(self.transitions, 1, policy)[:, 0, :]
+        T1 = T1.cpu().numpy()
+        a1 = np.linalg.inv((np.eye(self.n_states) - self.gamma * T1))
+        b1 = torch.from_numpy(a1).cuda()
+        V = torch.mm(b1, self.rewards.unsqueeze(dim=1)).squeeze(dim=1)
         return V
 
     def policy_q_evaluation(self, policy):
         V = self.policy_evaluation(policy)
-        Q = torch.zeros(self.transitions.size()[0:2]).cuda().double()
-        for state in self.states:
-            for action in self.actions:
-                Q[state, action] = torch.dot(self.transitions[state, action, :], self.rewards + self.gamma * V)
+        Q = self.rewards.unsqueeze(dim=1).expand(-1, self.n_action) + self.gamma * torch.mm(
+            self.transitions.view(-1, self.n_states), V.unsqueeze(dim=1)).squeeze(dim=1).view(self.n_states,
+                                                                                              self.n_action)
         return Q
+
 
     def value_iteration(self, theta=0.0001):
         V = np.zeros(len(self.states))
@@ -143,8 +148,9 @@ class MDP:
     '''
 
     def act(self, state, action):
-        next_state = np.random.choice(self.states, p=self.transitions[state, action, :])
-        return self.rewards[next_state], next_state
+        #next_state = np.random.choice(self.states, p=self.transitions[state, action, :])
+        next_state = torch.distributions.Categorical(probs=self.transitions[state, action, :]).sample()
+        return self.rewards[next_state], next_state.cuda()
 
     def calculate_rewards(self, reward_weights):
         rw = torch.mm(self.env_features, reward_weights.double().unsqueeze(dim=1)).double()
@@ -179,26 +185,57 @@ class MDP:
             if s0 == self.goal or len(demo) > 30:
                 go_on = False
             s0 = s1
-        confidence = 0.75
-        demos.append((reward_cum, demo, confidence))
-        return demos
+        return demo,reward_cum
 
     def get_reward_of_trajectory(self,trajectory):
         reward_sum = 0.
-        for sa in trajectory:
+        for saind,sa in enumerate(trajectory):
             reward_sum += self.rewards[sa[0]]
+            if (sa[0]==self.goal):
+                break
         return reward_sum
 
     def calculate_tp(self, tp_weights, tp_beta):
         n_states,d_states = self.env_features.size()
         n_actions = len(tp_weights)
-        tp_normalized = torch.zeros((n_states, n_actions, n_states)).cuda().double()
+
+        t = tp_weights.permute(1,0,2).double()
+        t = t.contiguous().view(2*d_states,-1)
+        prod3 = torch.mm(self.env_features,t[0:d_states]).view(-1,n_actions,2).unsqueeze(dim=2)
+        prod3 = prod3.expand((-1,-1,n_states,-1))
+        prod4 = torch.mm(self.env_features,t[d_states:]).view(-1,n_actions,2).permute(1,0,2).unsqueeze(dim=0)
+        prod4 = prod4.expand((n_states,-1,-1,-1))
+
+        fin_prod = prod3 + prod4
+        res_mag_out = torch.norm(fin_prod, p=2, dim=3)
+        res_q_out = torch.mul(res_mag_out, -1. * tp_beta)
+        tp_normalized = F.softmax(res_q_out, dim=2)
+
+        """
+        print "prod3: " + str(timeit.default_timer() - start_time)
+
+        #prod2 = torch.bmm(s2, t1[:, d_states:, :])
+        #prod2 = prod1.view(n_states, n_actions, -1)
+
+
+        start_time = timeit.default_timer()
+        
+        tp2 = torch.zeros(self.n_states,self.n_action,self.n_states)
         for s in range(n_states):
             for a in range(n_actions):
                 s_e = self.env_features[s]
                 a_weight = tp_weights[a].double()
                 res = torch.mm(torch.unsqueeze(s_e,dim=0), a_weight[0:d_states]) + torch.mm(self.env_features, a_weight[d_states:])
+                #res = torch.mm(torch.unsqueeze(s_e, dim=0), a_weight[0:d_states])
                 res_mag = torch.norm(res,p=2,dim=1)
                 res_q = torch.mul(res_mag,-1.*tp_beta)
-                tp_normalized[s,a] = F.softmax(torch.mul(res_q,-1.),dim=0)
+                tp2[s,a] = F.softmax(res_q,dim=0)
+        """
         return tp_normalized
+
+    def update_changed(self):
+        self.changed = True
+
+    def restore(self):
+        self.update_rewards(self.gt_reward)
+        self.update_tp(self.gt_tpweights,self.gt_tpbeta)

@@ -12,28 +12,38 @@ from scipy.stats import norm
 from scipy.stats import multivariate_normal as mnorm
 import torch
 
-def get_expected_sor(reward_samples, mdps, demos,demonstration_list,gt):
+def get_expected_sor(samples, mdps, demonstration_list):
     cum_rewards = []
     gt_reward_sum = 0.
-    for rind,rw in enumerate(reward_samples):
-        reward_sum = 0.
-        for dind,(_,eind) in enumerate(demonstration_list):
+    reward_samples = samples['reward']
+    tpweight_samples = samples['tpweights']
+    tpbeta_samples = samples['tpbeta']
+    n_samples = len(reward_samples)
+    valid_envs = torch.unique(demonstration_list[:, 1]).cuda()
+    for sample in range(n_samples):
+        rw = reward_samples[sample]
+        tpweight = tpweight_samples[sample]
+        tpbeta = tpbeta_samples[sample]
+
+        for eind in valid_envs:
             mdps[eind].update_rewards(rw)
+            mdps[eind].update_tp(tpweight,tpbeta)
             mdps[eind].update_policy()
-            trajectories = mdps[eind].get_trajectories()
-            mdps[eind].update_rewards(gt)
-            reward_sum += mdps[eind].get_reward_of_trajectory(trajectories[0][1])
-            if (rind == 0):
-                gt_reward_sum += mdps[eind].get_reward_of_trajectory(demos[dind])
-        cum_rewards.append(reward_sum)
-    return cum_rewards,gt_reward_sum
+        reward_sum = 0.
+        for dind,(spos,eind) in enumerate(demonstration_list):
+            mdps[eind].restore()
+            mdps[eind].start = spos
+            trajectories,rtemp = mdps[eind].get_trajectories()
+            reward_sum += rtemp
+        cum_rewards.append(reward_sum/len(demonstration_list))
+    return cum_rewards
 
 
 
 def birl(mdps, step_size, iterations, r_max, demos, demonstration_list, test_demos, test_demonstration_list, burn_in, sample_freq, d_states, beta, gt_reward_weight,prior):
-    if not isinstance(prior, PriorDistribution):
-        print("Invalid Prior")
-        raise ValueError
+    #if not isinstance(prior, PriorDistribution):
+    #    print("Invalid Prior")
+    #    raise ValueError
     """
     step_size = step_size
     iterations =iterations
@@ -48,13 +58,14 @@ def birl(mdps, step_size, iterations, r_max, demos, demonstration_list, test_dem
     beta= beta*torch.ones(1)
     gt_reward_weight = torch.from_numpy(np.array(gt_reward_weight))
     """
-    demos = torch.from_numpy(demos).cuda()
-    demonstration_list = torch.from_numpy(demonstration_list).cuda()
-
     samples, suboptimal_count = PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos,
                                            demonstration_list, d_states, beta, prior)
-    expected_sum_rewards, gt_expected_sum_rewards = get_expected_sor(samples['reward'], mdps, test_demos,
-                                                                     test_demonstration_list, gt_reward_weight)
+    cum_exp_sor = get_expected_sor(samples, mdps, test_demonstration_list)
+    cum_exp_sor = torch.from_numpy(np.array(cum_exp_sor))
+    metric1 = torch.Tensor([torch.mean(cum_exp_sor),torch.std(cum_exp_sor)])
+    metric2 = torch.cat((torch.mean(samples['tpflat'],dim=0),torch.mean(samples['tpflat'],dim=0)))
+    metric3 = torch.Tensor([torch.mean(torch.Tensor(samples['tpbeta'])),torch.std(torch.Tensor(samples['tpbeta']))])
+    """
     mean_val = np.mean(np.array(expected_sum_rewards), axis=0)
     std_val = np.std(np.array(expected_sum_rewards),axis = 0)
     print("Rewards are ")
@@ -63,6 +74,9 @@ def birl(mdps, step_size, iterations, r_max, demos, demonstration_list, test_dem
     optimal_policy = mdp.policy_iteration()[0]
     print("Computed Optimal BIRL policy")
     return optimal_policy
+    """
+    return metric1,metric2,metric3,samples
+    #return None
 
 
 # probability distribution P, mdp M, step size delta, and perhaps a previous policy
@@ -87,16 +101,16 @@ def select_random_tpweights(d_states, step_size):
                      [0., 0., 1., 0., 0., 0., 0., -1., 0., 0., -1., 0., 0., 0., 0., 0.]])
     tp_d = tp_d.view(-1)
 
-    tp_r_new = torch.distributions.MultivariateNormal(tp_r,0.05*torch.eye(len(tp_r))).sample().cuda()
+    tp_r_new = torch.distributions.MultivariateNormal(tp_r,0.05*torch.eye(len(tp_r))).sample()
     tp_r_new = stick_to_grid(tp_r_new,step_size)
 
-    tp_u_new = torch.distributions.MultivariateNormal(tp_u,0.05*torch.eye(len(tp_u))).sample().cuda()
+    tp_u_new = torch.distributions.MultivariateNormal(tp_u,0.05*torch.eye(len(tp_u))).sample()
     tp_u_new = stick_to_grid(tp_u_new, step_size)
 
-    tp_l_new = torch.distributions.MultivariateNormal(tp_l,0.05*torch.eye(len(tp_l))).sample().cuda()
+    tp_l_new = torch.distributions.MultivariateNormal(tp_l,0.05*torch.eye(len(tp_l))).sample()
     tp_l_new = stick_to_grid(tp_l_new, step_size)
 
-    tp_d_new = torch.distributions.MultivariateNormal(tp_d,0.05*torch.eye(len(tp_d))).sample().cuda()
+    tp_d_new = torch.distributions.MultivariateNormal(tp_d,0.05*torch.eye(len(tp_d))).sample()
     tp_d_new = stick_to_grid(tp_d_new, step_size)
 
     tp_r_new = torch.unsqueeze(tp_r_new.view(-1,2),dim=0)
@@ -104,7 +118,7 @@ def select_random_tpweights(d_states, step_size):
     tp_l_new = torch.unsqueeze(tp_l_new.view(-1, 2), dim=0)
     tp_d_new = torch.unsqueeze(tp_d_new.view(-1, 2), dim=0)
 
-    tp_weights = torch.cat((tp_r_new, tp_u_new, tp_l_new, tp_d_new),dim=0)
+    tp_weights = torch.cat((tp_r_new, tp_u_new, tp_l_new, tp_d_new),dim=0).cuda()
     return tp_weights
 
 
@@ -118,16 +132,20 @@ def select_random_tpbeta(step_size):
 def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, demonstration_list, d_states, beta, prior):
     reward_samples = []
     tp_weight_samples = []
+    tp_flat_weight_samples =[]
     tp_beta_samples = []
     # Step 1 - Pick a random reward vector
     current_reward_weight = select_random_reward(d_states,step_size,r_max)
     current_tp_weights = select_random_tpweights(d_states,step_size)
     current_tp_beta = select_random_tpbeta(5.)
     valid_envs = torch.unique(demonstration_list[:,1]).cuda()
-    print ("NEED TO PARSE %d ENVS" %len(valid_envs))
+    #print ("NEED TO PARSE %d ENVS" %len(valid_envs))
+    print "UPDATE INITIAL POLICY"
     for eind in valid_envs:
+        print ("ENV: %d out of %d" %(eind,len(valid_envs)))
         mdps[eind].update_rewards(current_reward_weight)
         mdps[eind].update_tp(current_tp_weights,current_tp_beta)
+
         # Step 2 - Policy Iteration per mdp and store it inside the object
         mdps[eind].update_policy()
         mdps[eind].do_policy_q_evaluation()
@@ -135,8 +153,9 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
     post_orig = None
     # Step 3
     suboptimal_count = 0
-
+    print "GETTING SAMPLES"
     for i in range(iterations):
+        print ("Iteration %d out of %d" %(i,iterations))
         start_time = timeit.default_timer()
         proposed_mdps = deepcopy(mdps)
         # Step 3a - Pick a reward vector uniformly at random from the neighbors of R
@@ -146,10 +165,10 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
         # Step 3b - Compute Q for policy under new reward
         for eind in valid_envs:
             proposed_mdps[eind].do_policy_q_evaluation()
-
         # Step 3c
         if post_orig is None:
             post_orig = compute_log_posterior(mdps, demos, demonstration_list, beta, prior, d_states, r_max, current_tp_weights, current_tp_beta)
+
         # if policy is suboptimal then proceed to 3ci, 3cii, 3ciii
         if suboptimal(proposed_mdps,demonstration_list):
             suboptimal_count += 1
@@ -161,10 +180,11 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
             Take fraction of posterior probability of proposed reward and policy over 
             posterior probability of original reward and policy
             '''
-            post_new = compute_log_posterior(proposed_mdps, demos, demonstration_list, beta, prior, d_states, r_max, new_tp_weight, new_tp_beta)
+            post_new = compute_log_posterior(proposed_mdps, demos, demonstration_list, beta, prior, d_states, r_max,
+                                             new_tp_weight, new_tp_beta)
             fraction = torch.exp(post_new - post_orig)
-            a = torch.rand(1).double().cuda() < torch.min(torch.ones(1).double().cuda(), fraction)
-            if (torch.equal(a,torch.zeros(1).byte().cuda())):
+            prob_of_one = torch.min(torch.ones(1),fraction.cpu().float())
+            if torch.equal(torch.distributions.Bernoulli(prob_of_one).sample(),torch.ones(1)):
                 for _,eind in demonstration_list:
                     mdps[eind].rewards = proposed_mdps[eind].rewards
                     mdps[eind].policy = proposed_mdps[eind].policy
@@ -177,10 +197,11 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
             Take fraction of the posterior probability of proposed reward under original policy over
             posterior probability of original reward and original policy
             '''
-            post_new = compute_log_posterior(proposed_mdps, demos, demonstration_list, beta, prior, d_states, r_max)
+            post_new = compute_log_posterior(proposed_mdps, demos, demonstration_list, beta, prior, d_states, r_max,
+                                             new_tp_weight, new_tp_beta)
             fraction = torch.exp(post_new - post_orig)
-            a = torch.rand(1).double().cuda() < torch.min(torch.ones(1).double().cuda(), fraction)
-            if (torch.equal(a,torch.zeros(1).byte().cuda())):
+            prob_of_one = torch.min(torch.ones(1), fraction.cpu().float())
+            if (torch.distributions.Bernoulli(prob_of_one).sample(),torch.ones(1)):
                 for _, eind in demonstration_list:
                     mdps[eind].rewards = proposed_mdps[eind].rewards
                 post_orig = post_new
@@ -191,13 +212,18 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
         # Store samples
         if i >= burn_in:
             if i % sample_freq == 0:
-                print(i)
+                #print(i)
                 reward_samples.append(current_reward_weight)
                 tp_weight_samples.append(current_tp_weights)
+                if len(tp_flat_weight_samples) == 0:
+                    tp_flat_weight_samples = current_tp_weights.view(-1).unsqueeze(dim=0)
+                else:
+                    tp_flat_weight_samples = torch.cat((tp_flat_weight_samples,current_tp_weights.view(-1).unsqueeze(dim=0)),dim=0)
+
                 tp_beta_samples.append(current_tp_beta)
-        print ("Time taken for iteration %d: %f" %(i,(timeit.default_timer()-start_time)))
+        #print ("Time taken for iteration %d: %f" %(i,(timeit.default_timer()-start_time)))
     # Step 4 - return the reward samples
-    samples = {'reward':reward_samples,'tpweights':tp_weight_samples,'tpbeta':tp_beta_samples}
+    samples = {'reward':reward_samples,'tpweights':tp_weight_samples,'tpflat':tp_flat_weight_samples,'tpbeta':tp_beta_samples}
     return samples,suboptimal_count
 
 
