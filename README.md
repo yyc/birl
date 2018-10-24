@@ -1,6 +1,11 @@
 # birl
 A Python Implementation of Bayesian Inverse Reinforcement Learning (BIRL)
 
+## Directories
+- tabular - BIRL implementation that uses a tabular form to represent rewards (as in the original BIRL paper)
+- reward - BIRL implementation that calculates reward as a function of state (BIRL learns the weights of this function)
+- tp - BIRL implementation that calculates reward as a functions of state AND TP as function of state, action and subsequent state
+
 ## Prerequisites
 
 - Python 2.7

@@ -149,6 +149,9 @@ if __name__ == '__main__':
     gt_reward_weight = [1, 0, 0, 0, 0, 0, 0, 0]
 
     #Load all the valid dataset
+    #State features are of the form: [state_type,xposition,yposition,right_move_allowed, up_move_allowed,left_move_allowed,down_move_allowed, 1]
+    #state_type = 1 for Goal, 0 and -1 for other states
+    #demonstration_list contains the tuple [start_position, environment_id] for each trajectory.
     demos = torch.from_numpy(np.load("valid_trajectories.npy")).cuda()
     demonstration_list = torch.from_numpy(np.load("valid_demonstration_list.npy")).cuda()
     env_features = torch.from_numpy(np.load("valid_environments.npy")).cuda()

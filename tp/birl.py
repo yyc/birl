@@ -111,18 +111,24 @@ def select_random_tpbeta(step_size):
 
 
 def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, demonstration_list, d_states, beta, prior):
+    #Refer to the BIRL paper from Deepak Ramachandran - Figure 3
     reward_samples = []
     tp_weight_samples = []
     tp_flat_weight_samples =[]
     tp_beta_samples = []
-    # Step 1 - Pick a random reward vector
+
+    # Step 1 - Pick a random reward weight and TP weight
     current_reward_weight = select_random_reward(d_states,step_size,r_max)
     current_tp_weights = select_random_tpweights(d_states,step_size)
     current_tp_beta = select_random_tpbeta(5.)
+
+    #To avoid calculating policy for same MDP more than once, find unique environments
+    #demonstration_list is a tuple of [start_position, environment]
     valid_envs = torch.unique(demonstration_list[:,1]).cuda()
-    #print ("NEED TO PARSE %d ENVS" %len(valid_envs))
+
     print "UPDATE INITIAL POLICY"
     for eind in valid_envs:
+        #Step 1(a) - Not in the original algorithm since that dealt with table of rewards
         print ("ENV: %d out of %d" %(eind,len(valid_envs)))
         mdps[eind].update_rewards(current_reward_weight)
         mdps[eind].update_tp(current_tp_weights,current_tp_beta)
@@ -130,8 +136,10 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
         # Step 2 - Policy Iteration per mdp and store it inside the object
         mdps[eind].update_policy()
         mdps[eind].do_policy_q_evaluation()
+
     # initialize an original posterior, will be useful later
     post_orig = None
+
     # Step 3
     suboptimal_count = 0
     print "GETTING SAMPLES"
@@ -202,7 +210,6 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
                     tp_flat_weight_samples = torch.cat((tp_flat_weight_samples,current_tp_weights.view(-1).unsqueeze(dim=0)),dim=0)
 
                 tp_beta_samples.append(current_tp_beta)
-        #print ("Time taken for iteration %d: %f" %(i,(timeit.default_timer()-start_time)))
     # Step 4 - return the reward samples
     samples = {'reward':reward_samples,'tpweights':tp_weight_samples,'tpflat':tp_flat_weight_samples,'tpbeta':tp_beta_samples}
     return samples,suboptimal_count
@@ -210,6 +217,8 @@ def PolicyWalk(mdps, step_size, iterations, burn_in, sample_freq, r_max, demos, 
 
 # Demos comes in the form (actual reward, demo, confidence)
 def compute_log_prior_tpweights(tp_weight):
+    #Assume tpweights follow Multivariate Normal Distribution
+    #using mean = weights that allow right, up, left and down action to the neighboring states
     mu_tp_r = torch.Tensor([[0., 1., 0., 0., 0., 0., 0., 1., 0., -1., 0., 0., 0., 0., 0., 0.],
                      [0., 0., 1., 0., 0., 0., 0., 0., 0., 0., -1., 0., 0., 0., 0., 0.]])
     mu_tp_r = mu_tp_r.view(-1)
@@ -240,13 +249,14 @@ def compute_log_prior_tpweights(tp_weight):
 
 
 def compute_log_prior_tpbeta(tp_beta):
+    #Assume Normal distribution for tpbeta
     return torch.distributions.Normal(100. * torch.ones(1).double(), 1. * torch.ones(1).double()).log_prob(
         tp_beta.cpu()).cuda()
 
 
 def compute_log_posterior(mdps, demos, demonstration_list, beta, prior, d_states,r_max,tp_weight, tp_beta):
     log_exp_val = 0
-    # go through each demo
+    # go through each demo and calculate the likelihood
     for d,demo in enumerate(demos):
         mdp = mdps[demonstration_list[d,1]]
         # for each state action pair in the demo
@@ -275,16 +285,16 @@ def compute_log_posterior(mdps, demos, demonstration_list, beta, prior, d_states
 
 
 def compute_log_prior(prior, d_states, r_max):
+    #Assume uniform prior for reward
     if prior == PriorDistribution.UNIFORM:
         return torch.mul(torch.log(2. * r_max*torch.ones(1).cuda()),-1.*d_states).double()
 
 
 def mcmc_step(current_reward, current_tp_weights, current_tp_beta, mdps, valid_envs, step_size, r_max):
     possible_dirs = torch.Tensor([-1,1]).cuda()
+    #for each dimension of current reward weight, decide if we should move in that dimension or not
     indices = torch.randint(0,2,(current_reward.size()[0],)).long().cuda()
     direction = possible_dirs[indices]
-    #for each dimension of current reward weight, decide if we should move in that dimension or not
-    #direction = np.array([pow(-1, random.randint(0, 1)) for _ in range(len(current_reward))])
     '''
     move reward at index either +step_size or -step_size, if reward
     is too large, move it to r_max, and if it too small, move to -_rmax
@@ -293,7 +303,7 @@ def mcmc_step(current_reward, current_tp_weights, current_tp_beta, mdps, valid_e
     new_reward = torch.min(new_reward,torch.mul(torch.ones(new_reward.size()[0]).cuda(),r_max))
     new_reward = torch.max(new_reward, torch.mul(torch.ones(new_reward.size()[0]).cuda(), -1*r_max))
 
-
+    #Use the same logic as above to take a step for tpweights for right action
     #Update tp_r
     current_tp_r = current_tp_weights[0].view(-1)
     indices = torch.randint(0, 2, (current_tp_r.size()[0],)).long().cuda()
@@ -302,7 +312,7 @@ def mcmc_step(current_reward, current_tp_weights, current_tp_beta, mdps, valid_e
     new_tp_r = torch.min(new_tp_r, torch.mul(torch.ones(new_tp_r.size()[0]).cuda(), r_max))
     new_tp_r = torch.max(new_tp_r, torch.mul(torch.ones(new_tp_r.size()[0]).cuda(), -1 * r_max))
 
-    # Update tp_u
+    # Update tp_u - up action
     current_tp_u = current_tp_weights[1].view(-1)
     indices = torch.randint(0, 2, (current_tp_u.size()[0],)).long().cuda()
     direction = possible_dirs[indices]
@@ -310,7 +320,7 @@ def mcmc_step(current_reward, current_tp_weights, current_tp_beta, mdps, valid_e
     new_tp_u = torch.min(new_tp_u, torch.mul(torch.ones(new_tp_u.size()[0]).cuda(), r_max))
     new_tp_u = torch.max(new_tp_u, torch.mul(torch.ones(new_tp_u.size()[0]).cuda(), -1 * r_max))
 
-    # Update tp_l
+    # Update tp_l - left action
     current_tp_l = current_tp_weights[0].view(-1)
     indices = torch.randint(0, 2, (current_tp_l.size()[0],)).long().cuda()
     direction = possible_dirs[indices]
@@ -318,7 +328,7 @@ def mcmc_step(current_reward, current_tp_weights, current_tp_beta, mdps, valid_e
     new_tp_l = torch.min(new_tp_l, torch.mul(torch.ones(new_tp_l.size()[0]).cuda(), r_max))
     new_tp_l = torch.max(new_tp_l, torch.mul(torch.ones(new_tp_l.size()[0]).cuda(), -1 * r_max))
 
-    # Update tp_d
+    # Update tp_d - down action
     current_tp_d = current_tp_weights[0].view(-1)
     indices = torch.randint(0, 2, (current_tp_d.size()[0],)).long().cuda()
     direction = possible_dirs[indices]
